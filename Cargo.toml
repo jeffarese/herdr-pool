@@ -1,0 +1,31 @@
+[package]
+name = "herdr-pool"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "Your machines as one pool for coding agents and test runs, on top of herdr-core (hc)"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "herdr-pool"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+# preserve_order: files we edit for someone else (Claude Code's config) keep their key order.
+serde_json = { version = "1", features = ["preserve_order"] }
+toml = { version = "0.8", default-features = false, features = ["parse"] }
+base64 = "0.22"
+libc = "0.2"
+# The terminal side: raw-mode keys for questions, and how wide text is on screen.
+crossterm = { version = "0.29", default-features = false, features = ["events"] }
+unicode-width = "0.2"
+
+# Agents call this many times a session: startup and size matter more than
+# compile time.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
