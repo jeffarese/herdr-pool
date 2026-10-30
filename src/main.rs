@@ -17,6 +17,7 @@ mod jobs;
 mod onboard;
 mod out;
 mod pool;
+mod repos;
 mod shards;
 mod signal;
 mod state;
@@ -62,6 +63,7 @@ const GROUPS: &[(&str, &[Command])] = &[
             ("add", "[ssh-target]", "add a machine (no target: pick from those found)"),
             ("doctor", "[--fix]", "check every machine, and put right what can be"),
             ("refresh", "", "ask machines' login PATH again, copy hc templates"),
+            ("repos", "[rm [repo]]", "what each machine keeps of your repositories; rm deletes it"),
             ("skill", "[install]", "the agent skill: print it, or install it for Claude Code"),
         ],
     ),
@@ -147,6 +149,7 @@ fn dispatch(argv: &[String]) -> error::Result<i32> {
         "refresh" | "setup" => fleet::refresh(rest),
         "doctor" => fleet::doctor(rest),
         "skill" => fleet::skill(rest),
+        "repos" => repos::repos(rest),
         "--skill" => {
             println!("{}", fleet::skill_body());
             Ok(0)

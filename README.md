@@ -48,6 +48,28 @@ beyond a cache.
 it back as branch `pool/<job>`, and with `--apply` applies the changes to your
 work tree.
 
+### What your machines keep
+
+A machine that ran a job keeps a copy of the repository under its pool root
+(`~/.herdr-pool` unless `root` says otherwise). The mirror holds its history:
+every branch of `origin` where that machine can fetch from it, otherwise the full
+history behind the snapshots it was sent. The work trees hold a checkout with dependencies and
+build output. `rm` and `gc` give trees back but keep them warm, `gc --purge`
+deletes the free ones, and the mirror stays until you delete it:
+
+```sh
+herdr-pool repos                          # what each machine keeps: size, trees, jobs, origin
+herdr-pool repos rm                       # this repository's copies, on every machine
+herdr-pool repos rm org/api --on studio   # a named one, on some machines
+herdr-pool repos rm --all                 # every repository's, and the pool's folder with them
+```
+
+A copy stays where a job still runs in it, or where a job left work you haven't
+pulled (`--force` drops that work); a machine that is out of reach keeps its copy
+until you run it again. Claude Code keeps its own records of agents that worked
+there: their session logs (`~/.claude/projects/<tree>`) stay unless you add
+`--agent-logs`, and its entry for the repository in `~/.claude.json` stays.
+
 ## Install
 
 ```sh
@@ -106,6 +128,7 @@ you answer it with `hc attach`.
 | `test [-- cmd]` | One suite split across machines; a line per shard, failures' tails, exit code |
 | `each -- <cmd>` | A shell command on every machine at once |
 | `gc` | Give back trees of finished jobs and remove finished terminals (`--purge` deletes free trees) |
+| `repos [rm [repo]]` | What each machine keeps of your repositories; `rm` deletes it (`--all`, `--on`, `--agent-logs`) |
 | `init` | Set the pool up: find your machines, help ssh in, install hc, check them, install the skill |
 | `add [target]` | Add a machine: pick from those found, `user@host`, or `--via '<command>' --name N` |
 | `doctor [--fix]` | Check hc, git, the agents and disk everywhere; `--fix` puts right what it can |

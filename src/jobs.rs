@@ -244,7 +244,7 @@ impl Launch<'_> {
                 match (m.on.is_some(), sent) {
                     (false, _) => s.clear(),
                     (true, 0) => s.ok(format!("{} has the snapshot already", m.name)),
-                    (true, n) => s.ok(format!("Sent the snapshot to {}  {}", m.name, ui::dim(bytes(n)))),
+                    (true, n) => s.ok(format!("Sent the snapshot to {}  {}", m.name, ui::dim(out::bytes(n)))),
                 }
                 let s = ui::spin(format!("Getting a work tree on {}", m.name));
                 let slot = sync::take(hc, m, &repo.key, &lease)?;
@@ -467,14 +467,6 @@ fn setup_for(cfg: &Config, repo: &Repo, sha: &str) -> Option<(String, Vec<String
 }
 
 /// `14 KB`, `3.2 MB`.
-fn bytes(n: u64) -> String {
-    match n {
-        0..=1023 => format!("{n} B"),
-        1024..=1_048_575 => format!("{:.0} KB", n as f64 / 1024.0),
-        _ => format!("{:.1} MB", n as f64 / 1_048_576.0),
-    }
-}
-
 /// The program a template's command runs: its first word after any
 /// `NAME=value` settings and `exec`/`env`.
 fn program_of(command: &str) -> Option<&str> {
@@ -1146,7 +1138,7 @@ pub fn gc(argv: &[String]) -> Result<i32> {
     let a = args::parse(argv, &["force", "purge"], &[], false)?;
     if a.flag("help") {
         println!(
-            "herdr-pool gc [--force] [--purge]\n\nGives back trees of jobs that ended and whose work is pulled or empty, and\nremoves finished pool terminals. --force also drops unpulled work; --purge\nalso deletes free trees (their dependencies with them) to free disk."
+            "herdr-pool gc [--force] [--purge]\n\nGives back trees of jobs that ended and whose work is pulled or empty, and\nremoves finished pool terminals. --force also drops unpulled work; --purge\nalso deletes free trees (their dependencies with them) to free disk. The\nrepositories' mirrors stay: herdr-pool repos rm deletes those."
         );
         return Ok(0);
     }
@@ -1170,41 +1162,18 @@ pub fn gc(argv: &[String]) -> Result<i32> {
                     }
                     continue;
                 };
-                if active(&mut hc, &world, m, l) {
-                    continue;
-                }
-                // What it held for: a cleanup that never finished cleans up its job.
-                let job = match l.kind.as_str() {
-                    "cleanup" => l.job.strip_prefix('-').unwrap_or_default(),
-                    _ => l.job.as_str(),
-                };
-                if l.kind != "shard" && l.kind != "cleanup" && !force {
-                    match sync::bring_back(&mut hc, m, None, key, slot, job, &l.base, "", false, &env) {
-                        Ok(Outcome::Same) => {}
-                        Ok(Outcome::Changed(res)) if l.pulled.as_deref() == Some(res.as_str()) => {}
-                        Ok(_) => {
-                            kept.push(format!("{job} ({})", m.name));
-                            keep.insert(job.to_string());
-                            continue;
-                        }
-                        Err(e) => {
-                            unsure.push(format!("{job} ({}): {}", m.name, e.msg));
-                            keep.insert(job.to_string());
-                            continue;
-                        }
+                match give_back(&mut hc, &world, m, key, slot, l, force, purge, &env, here.as_ref()) {
+                    GaveBack::Freed(_) => freed += 1,
+                    GaveBack::Busy(_) => {}
+                    GaveBack::Kept(job) => {
+                        kept.push(format!("{job} ({})", m.name));
+                        keep.insert(job);
+                    }
+                    GaveBack::Unsure(job, why) => {
+                        unsure.push(format!("{job} ({}): {why}", m.name));
+                        keep.insert(job);
                     }
                 }
-                let me = sync::cleaner(l, &world.me.id);
-                if !matches!(sync::swap(&mut hc, m, key, slot, Some(&l.job), Then::Held(me.clone())), Ok(true)) {
-                    continue; // someone else is at it
-                }
-                let dropped = sync::drop_tree(&mut hc, m, key, slot, job, purge, &env);
-                let then = if purge && dropped.is_ok() { Then::Gone } else { Then::Free };
-                let _ = sync::swap(&mut hc, m, key, slot, Some(&me.job), then);
-                if let Some(repo) = here.as_ref().filter(|r| r.key == *key) {
-                    repo.unpin(job);
-                }
-                freed += 1;
             }
         }
     }
@@ -1268,6 +1237,64 @@ fn active(hc: &mut Hc, world: &World, m: &pool::Machine, l: &Lease) -> bool {
                 || world.terminals.iter().any(|t| pool::is_live(t) && pool::belongs(t, &l.job))
         }
     }
+}
+
+/// What became of a tree a job held (gc, repos rm), and that job's name.
+pub enum GaveBack {
+    /// The job ended and none of its work is lost (or --force): the tree
+    /// is free again, or deleted with `purge`.
+    Freed(String),
+    /// The job still runs, or someone else is cleaning its tree up.
+    Busy(String),
+    /// The job ended with work you haven't pulled.
+    Kept(String),
+    /// The job ended; whether you pulled its work couldn't be told.
+    Unsure(String, String),
+}
+
+/// Gives back the tree `l` holds, when its job ended and its work was
+/// pulled or is empty, or with `force`.
+#[allow(clippy::too_many_arguments)]
+pub fn give_back(
+    hc: &mut Hc,
+    world: &World,
+    m: &pool::Machine,
+    key: &str,
+    slot: u32,
+    l: &Lease,
+    force: bool,
+    purge: bool,
+    env: &hc::Env,
+    here: Option<&Repo>,
+) -> GaveBack {
+    // What it held for: a cleanup that never finished cleans up its job.
+    let job = match l.kind.as_str() {
+        "cleanup" => l.job.strip_prefix('-').unwrap_or_default(),
+        _ => l.job.as_str(),
+    }
+    .to_string();
+    if active(hc, world, m, l) {
+        return GaveBack::Busy(job);
+    }
+    if l.kind != "shard" && l.kind != "cleanup" && !force {
+        match sync::bring_back(hc, m, None, key, slot, &job, &l.base, "", false, env) {
+            Ok(Outcome::Same) => {}
+            Ok(Outcome::Changed(res)) if l.pulled.as_deref() == Some(res.as_str()) => {}
+            Ok(_) => return GaveBack::Kept(job),
+            Err(e) => return GaveBack::Unsure(job, e.msg),
+        }
+    }
+    let me = sync::cleaner(l, &world.me.id);
+    if !matches!(sync::swap(hc, m, key, slot, Some(&l.job), Then::Held(me.clone())), Ok(true)) {
+        return GaveBack::Busy(job); // someone else is at it
+    }
+    let dropped = sync::drop_tree(hc, m, key, slot, &job, purge, env);
+    let then = if purge && dropped.is_ok() { Then::Gone } else { Then::Free };
+    let _ = sync::swap(hc, m, key, slot, Some(&me.job), then);
+    if let Some(repo) = here.filter(|r| r.key == key) {
+        repo.unpin(&job);
+    }
+    GaveBack::Freed(job)
 }
 
 /// Deletes a free tree, holding its slot meanwhile so nobody checks out

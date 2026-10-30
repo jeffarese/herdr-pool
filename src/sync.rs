@@ -95,10 +95,25 @@ fn edit<T>(hc: &mut Hc, m: &Machine, mut change: impl FnMut(&mut Doc) -> Result<
     Err(Error::new(format!("{}: the lease document keeps changing; try again", m.name)))
 }
 
+/// The lease document's mark on a repository whose copy is being deleted
+/// there (`repos rm`): `take` hands out none of its trees meanwhile. Not a
+/// number, so nothing counts it as a tree.
+pub const CLOSED: &str = "closed";
+
+/// The mark of a `repos rm` that died stops counting after this.
+const CLOSED_FOR_MS: u64 = 10 * 60 * 1000;
+
+fn closed(slots: &BTreeMap<String, Option<Lease>>) -> Option<&Lease> {
+    slots.get(CLOSED)?.as_ref().filter(|l| crate::state::now_ms().saturating_sub(l.since) < CLOSED_FOR_MS)
+}
+
 /// A tree for `lease.job`: the lowest free (warm) slot, else a new one.
 pub fn take(hc: &mut Hc, m: &Machine, key: &str, lease: &Lease) -> Result<u32> {
     edit(hc, m, |doc| {
         let slots = doc.trees.entry(key.into()).or_default();
+        if closed(slots).is_some() {
+            return Err(Error::new(format!("{}: this repository's copy there is being deleted (repos rm); try again in a moment", m.name)));
+        }
         let free = slots.iter().filter(|(_, l)| l.is_none()).filter_map(|(s, _)| s.parse::<u32>().ok()).min();
         let slot = free.unwrap_or_else(|| slots.keys().filter_map(|s| s.parse::<u32>().ok()).max().unwrap_or(0) + 1);
         slots.insert(slot.to_string(), Some(lease.clone()));
@@ -145,6 +160,59 @@ pub fn swap(hc: &mut Hc, m: &Machine, key: &str, slot: u32, job: Option<&str>, t
             };
         }
         Ok(holds)
+    })
+}
+
+/// Marks `key` closed on `m` with `mark`. False when another `repos rm`
+/// has it marked.
+pub fn close(hc: &mut Hc, m: &Machine, key: &str, mark: &Lease) -> Result<bool> {
+    edit(hc, m, |doc| {
+        let slots = doc.trees.entry(key.into()).or_default();
+        if closed(slots).is_some_and(|l| l.job != mark.job) {
+            return Ok(false);
+        }
+        slots.insert(CLOSED.into(), Some(mark.clone()));
+        Ok(true)
+    })
+}
+
+/// Takes `mark` off `key` again: nothing was deleted.
+pub fn reopen(hc: &mut Hc, m: &Machine, key: &str, mark: &Lease) -> Result<()> {
+    edit(hc, m, |doc| {
+        let empty = match doc.trees.get_mut(key) {
+            Some(slots) => {
+                if slots.get(CLOSED).is_some_and(|l| l.as_ref().is_some_and(|l| l.job == mark.job)) {
+                    slots.remove(CLOSED);
+                }
+                slots.is_empty()
+            }
+            None => false,
+        };
+        if empty {
+            doc.trees.remove(key);
+        }
+        Ok(())
+    })
+}
+
+/// Once `key`'s files are gone from `m`: its free trees and `mark` leave the
+/// document (a tree someone holds would stay, though none should).
+pub fn forget_copy(hc: &mut Hc, m: &Machine, key: &str, mark: &Lease) -> Result<()> {
+    edit(hc, m, |doc| {
+        let empty = match doc.trees.get_mut(key) {
+            Some(slots) => {
+                slots.retain(|slot, l| match l {
+                    None => false,
+                    Some(l) => slot != CLOSED || l.job != mark.job,
+                });
+                slots.is_empty()
+            }
+            None => false,
+        };
+        if empty {
+            doc.trees.remove(key);
+        }
+        Ok(())
     })
 }
 
@@ -324,8 +392,116 @@ if [ "$purge" = 1 ]; then
 fi
 "#;
 
+/// Claude Code keeps an agent's session log in `<config>/projects/<folder>`,
+/// the folder it started in with every character but letters and digits made
+/// `-`, in each config folder there may be. These are the logs of folders
+/// under `$3` of the pool's root, as given (`$1`) and resolved (`$2`): `$4`
+/// exact takes only `<that><slot>`, any takes all. `$5` 1 deletes them, else
+/// they are listed.
+const CLAUDE_LOGS: &str = r#"claude_logs() {
+  for base in "$1" "$2"; do
+    [ -n "$base" ] || continue
+    p=$(printf '%s' "$base/$3" | sed 's/[^A-Za-z0-9]/-/g')
+    for c in ${CLAUDE_CONFIG_DIR:+"$CLAUDE_CONFIG_DIR"} "$HOME"/.claude*; do
+      for d in "$c/projects/$p"*; do
+        [ -d "$d" ] || continue
+        rest=${d##*/}
+        rest=${rest#"$p"}
+        case $4:$rest in exact:|exact:*[!0-9]*) continue ;; esac
+        if [ "$5" = 1 ]; then rm -rf "$d" && echo "deleted-log $d"; else echo "log $d"; fi
+      done
+    done
+  done
+}
+"#;
+
+/// Every repository's copy here, a line each: its key, the KB its mirror
+/// and its trees take, how many trees, when it was last used (epoch s), and
+/// where its history came from.
+const LIST: &str = r#"for mirror in "$root"/repos/*.git; do
+  [ -d "$mirror" ] || continue
+  key=${mirror##*/}
+  key=${key%.git}
+  trees="$root/trees/$key"
+  mkb=$(du -sk "$mirror" 2>/dev/null | awk '{print $1 + 0}')
+  tkb=0 n=0
+  if [ -d "$trees" ]; then
+    tkb=$(du -sk "$trees" 2>/dev/null | awk '{print $1 + 0}')
+    n=$(find "$trees" -mindepth 1 -maxdepth 1 -type d ! -name '.*' | wc -l | tr -d ' ')
+  fi
+  used=0
+  for f in "$mirror" "$mirror/FETCH_HEAD" "$mirror/packed-refs" "$mirror/refs/herdr-pool" "$trees"; do
+    [ -e "$f" ] || continue
+    t=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || echo 0)
+    [ "$t" -le "$used" ] || used=$t
+  done
+  origin=$(git -C "$mirror" config --get remote.origin.url 2>/dev/null || :)
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$key" "$mkb" "$tkb" "$n" "$used" "$origin"
+done
+"#;
+
+/// The repository's copy goes: its trees (dependencies, setup marks and
+/// logs with them) and its mirror, a half-made one included.
+const DELETE: &str = r#"logs=$3
+case $key in ""|.*|*/*) echo "not a repository key: $key" >&2; exit 2 ;; esac
+trees="$root/trees/$key"
+kb=$(du -sk "$mirror" "$trees" 2>/dev/null | awk '{n += $1} END {print n + 0}')
+real=$(cd "$root" 2>/dev/null && pwd -P || :)
+rm -rf "$trees" "$mirror" "$mirror.new" "$mirror.lock"
+echo "kb $kb"
+claude_logs "$root" "$real" "trees/$key/" exact "$logs"
+"#;
+
+/// After every copy went: half-sent snapshots and the empty folders too.
+const SWEEP: &str = r#"logs=$3
+real=$(cd "$root" 2>/dev/null && pwd -P || :)
+rm -rf "$root/tmp"
+rmdir "$root/trees" "$root/repos" 2>/dev/null || :
+claude_logs "$root" "$real" "trees/" any "$logs"
+"#;
+
 fn script(body: &str) -> String {
     format!("{PRELUDE}{body}")
+}
+
+/// One line per repository copied to `m` (LIST says what is in it).
+pub fn copies(hc: &mut Hc, m: &Machine, env: &Env) -> Result<String> {
+    run(hc, m, LIST, &[m.root(), ""], env, 300.0)
+}
+
+/// What deleting freed, and Claude Code's session logs found there.
+#[derive(Default)]
+pub struct Deleted {
+    pub bytes: u64,
+    /// Left there, or deleted with them.
+    pub logs: Vec<String>,
+    pub logs_deleted: Vec<String>,
+}
+
+fn deleted(text: &str) -> Deleted {
+    let mut d = Deleted::default();
+    for line in text.lines() {
+        match line.split_once(' ') {
+            Some(("kb", n)) => d.bytes += n.trim().parse::<u64>().unwrap_or(0) * 1024,
+            Some(("log", p)) if !d.logs.iter().any(|l| l == p) => d.logs.push(p.into()),
+            Some(("deleted-log", p)) => d.logs_deleted.push(p.into()),
+            _ => {}
+        }
+    }
+    d
+}
+
+/// Deletes `key`'s copy on `m`: mirror and trees. Claude Code's session logs
+/// of agents that worked in those trees go too with `logs`, else are listed.
+pub fn delete_copy(hc: &mut Hc, m: &Machine, key: &str, logs: bool, env: &Env) -> Result<Deleted> {
+    let body = format!("{CLAUDE_LOGS}{DELETE}");
+    run(hc, m, &body, &[m.root(), key, if logs { "1" } else { "0" }], env, 600.0).map(|t| deleted(&t))
+}
+
+/// After every copy on `m` went: what is left of the pool's folder there.
+pub fn sweep(hc: &mut Hc, m: &Machine, logs: bool, env: &Env) -> Result<Deleted> {
+    let body = format!("{CLAUDE_LOGS}{SWEEP}");
+    run(hc, m, &body, &[m.root(), "", if logs { "1" } else { "0" }], env, 300.0).map(|t| deleted(&t))
 }
 
 fn run(hc: &mut Hc, m: &Machine, body: &str, args: &[&str], env: &Env, timeout: f64) -> Result<String> {
@@ -550,6 +726,7 @@ mod tests {
                 .arg("herdr-pool")
                 .args(args)
                 .env("HOME", &dir)
+                .env("CLAUDE_CONFIG_DIR", dir.join("claude"))
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
                 .env("GIT_AUTHOR_NAME", "t")
                 .env("GIT_AUTHOR_EMAIL", "t@t")
@@ -632,6 +809,45 @@ mod tests {
         run(DROP, &["~/.herdr-pool", "k", "1", "j3", "0"]);
         run(DROP, &["~/.herdr-pool", "k", "1", "", "1"]); // a free tree: no job's refs to drop
         assert!(!Path::new(tree).exists(), "purged");
+
+        // What repos lists and repos rm deletes. Tree 2 is still there, with
+        // a Claude Code session log named after it; one only looks alike,
+        // another is k2's.
+        let listed = run(LIST, &["~/.herdr-pool", ""]);
+        let rows: Vec<Vec<&str>> = listed.lines().map(|l| l.split('\t').collect()).collect();
+        assert_eq!(rows.iter().map(|r| r[0]).collect::<Vec<_>>(), ["k", "k2"], "{listed}");
+        let k = &rows[0];
+        assert!(k[1].parse::<u64>().unwrap() > 0 && k[2].parse::<u64>().unwrap() > 0, "{listed}");
+        assert_eq!(k[3], "1", "one tree left: {listed}");
+        assert!(k[4].parse::<u64>().unwrap() > 1_600_000_000, "{listed}");
+        assert_eq!(k[5], src_s, "a local mirror's origin is your repository");
+        let real = std::fs::canonicalize(dir.join(".herdr-pool")).unwrap().to_string_lossy().into_owned();
+        let named = |p: String| p.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect::<String>();
+        let projects = dir.join("claude/projects");
+        let log = projects.join(named(format!("{real}/trees/k/2")));
+        let alike = projects.join(named(format!("{real}/trees/k/2x")));
+        let other = projects.join(named(format!("{real}/trees/k2/1")));
+        for d in [&log, &alike, &other] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let delete = format!("{CLAUDE_LOGS}{DELETE}");
+        let d = deleted(&run(&delete, &["~/.herdr-pool", "k", "0"]));
+        assert!(d.bytes > 0 && d.logs == [log.to_string_lossy()] && d.logs_deleted.is_empty(), "{:?}", d.logs);
+        assert!(!repos.join("k.git").exists() && !dir.join(".herdr-pool/trees/k").exists(), "mirror and trees gone");
+        assert!(repos.join("k2.git").exists(), "another repository's copy stays");
+        assert!(log.exists(), "session logs stay unless asked");
+        let d = deleted(&run(&delete, &["~/.herdr-pool", "k", "1"]));
+        assert_eq!(d.logs_deleted, [log.to_string_lossy()]);
+        assert!(!log.exists() && alike.exists() && other.exists(), "only that tree's logs");
+        let climb = sh(&delete, &["~/.herdr-pool", "..", "1"]).output().unwrap();
+        assert_eq!(climb.status.code(), Some(2), "a key can't reach outside its folder");
+        assert!(dir.join(".herdr-pool/repos").exists());
+        run(&delete, &["~/.herdr-pool", "k2", "0"]);
+        let d = deleted(&run(&format!("{CLAUDE_LOGS}{SWEEP}"), &["~/.herdr-pool", "", "1"]));
+        assert_eq!(d.logs_deleted.len(), 2, "after --all, every pool tree's logs: {:?}", d.logs_deleted);
+        for gone in ["repos", "trees", "tmp"] {
+            assert!(!dir.join(".herdr-pool").join(gone).exists(), "{gone}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -9,6 +9,7 @@ use crate::discover::{self, Candidate, Probe, Reach};
 use crate::error::{Error, Result};
 use crate::fleet;
 use crate::hc::{self, Hc};
+use crate::out::plural;
 use crate::pool::{Machine, World};
 use crate::ui::{self, Item, Tone};
 use serde_json::Value;
@@ -854,9 +855,6 @@ pub fn skill(yes: bool) -> Result<()> {
     Ok(())
 }
 
-fn plural(n: usize, what: &str) -> String {
-    format!("{n} {what}{}", if n == 1 { "" } else { "s" })
-}
 
 /// The pool as it is now, and what to try.
 fn finish(hc: &mut Hc, cfg: &Config) -> Result<i32> {

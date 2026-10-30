@@ -1,6 +1,21 @@
 //! Small text helpers for the plain output agents read: short lines, no
 //! decoration, only what the next step needs. (ui.rs dresses it for people.)
 
+/// `1 tree`, `3 trees`.
+pub fn plural(n: usize, what: &str) -> String {
+    format!("{n} {what}{}", if n == 1 { "" } else { "s" })
+}
+
+/// `512 B`, `38 KB`, `4.2 MB`, `1.3 GB`.
+pub fn bytes(n: u64) -> String {
+    match n {
+        0..=1023 => format!("{n} B"),
+        1024..=1_048_575 => format!("{:.0} KB", n as f64 / 1024.0),
+        1_048_576..=1_073_741_823 => format!("{:.1} MB", n as f64 / 1_048_576.0),
+        _ => format!("{:.1} GB", n as f64 / 1_073_741_824.0),
+    }
+}
+
 pub fn short(sha: &str) -> &str {
     &sha[..sha.len().min(7)]
 }

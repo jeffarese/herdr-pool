@@ -242,5 +242,36 @@ if has "$out" "no pool jobs"; then ok "nothing left after gc"; else bad "nothing
 out=$("$bin" doctor 2>&1)
 if has "$out" "^a  ok" && has "$out" "^b  ok"; then ok "doctor checks every machine"; else bad "doctor checks every machine" "$out"; fi
 
+# --- what each machine keeps of the repository -----------------------------
+on_b() { if [ -n "$remote" ]; then there "$1"; else sh -c "$1"; fi; }
+key=$(cd "$work/root-local/repos" 2>/dev/null && ls -d repo-*.git | head -n 1)
+key=${key%.git}
+out=$("$bin" repos 2>&1)
+if [ -n "$key" ] && has "$out" "^local  $key " && has "$out" "^a  $key " && has "$out" "^b  $key "; then ok "repos lists the copy on every machine"; else bad "repos lists the copy on every machine" "$out"; fi
+"$bin" run --on b --name holder -- sleep 60 >/dev/null 2>&1
+out=$("$bin" repos rm --on b 2>&1); code=$?
+if [ $code = 1 ] && has "$out" "holder is still at work" && on_b "test -d '$work/root-b/repos/$key.git'"; then ok "a job at work keeps its copy"; else bad "a job at work keeps its copy" "$out"; fi
+"$bin" rm holder --force >/dev/null 2>&1
+# A Claude Code session log of an agent in one of b's trees, named the way
+# Claude Code names them.
+real=$(on_b "cd '$work/root-b' && pwd -P")
+log=$(printf '%s' "$real/trees/$key/1" | sed 's/[^A-Za-z0-9]/-/g')
+on_b "mkdir -p '$work/claude/projects/$log'"
+out=$("$bin" repos rm --on b 2>&1); code=$?
+if [ $code = 0 ] && has "$out" "^b: deleted $key (" && has "$out" "session log stays: .*$log (herdr-pool repos rm $key --agent-logs" \
+  && ! on_b "test -e '$work/root-b/repos/$key.git' || test -e '$work/root-b/trees/$key'" && on_b "test -d '$work/claude/projects/$log'"; then
+  ok "repos rm deletes b's copy and says where agents' logs stay"
+else bad "repos rm deletes b's copy and says where agents' logs stay" "$out"; fi
+out=$("$bin" repos rm --on b --agent-logs 2>&1); code=$?
+if [ $code = 0 ] && has "$out" "deleted 1 agent session log of $key" && ! on_b "test -e '$work/claude/projects/$log'"; then ok "--agent-logs deletes those logs"; else bad "--agent-logs deletes those logs" "$out"; fi
+out=$("$bin" run --on b --name again -- true 2>&1)
+"$bin" wait again --timeout 60 >/dev/null 2>&1
+if has "$out" "^again  b/t"; then ok "a run afterwards makes the copy again"; else bad "a run afterwards makes the copy again" "$out"; fi
+"$bin" rm again >/dev/null 2>&1
+out=$("$bin" repos rm --all 2>&1); code=$?
+left=$(find "$work/root-local" "$work/root-a" -mindepth 1 2>/dev/null; on_b "find '$work/root-b' -mindepth 1 2>/dev/null")
+if [ $code = 0 ] && [ -z "$left" ]; then ok "repos rm --all leaves nothing on any machine"; else bad "repos rm --all leaves nothing on any machine" "$out
+$left"; fi
+
 echo "$pass passed, $failed failed"
 [ "$failed" = 0 ]

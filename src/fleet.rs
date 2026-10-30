@@ -5,7 +5,7 @@ use crate::args;
 use crate::config::{self, Config};
 use crate::error::{Error, Result};
 use crate::hc::{self, Env, Hc};
-use crate::out;
+use crate::out::{self, plural};
 use crate::pool::{self, Kind, Machine, World, JOB};
 use crate::ui::{self, Tone};
 use serde_json::{json, Value};
@@ -223,13 +223,9 @@ pub fn remedy(m: &Machine) -> (String, Option<String>) {
     }
 }
 
-fn plural(n: usize, what: &str) -> String {
-    format!("{n} {what}{}", if n == 1 { "" } else { "s" })
-}
-
 /// Machines `--on`/`--needs` keep (disabled ones too: these are your
 /// commands, not placement), reachable or not.
-fn wanted<'w>(world: &'w World, a: &args::Args) -> Result<Vec<&'w Machine>> {
+pub fn wanted<'w>(world: &'w World, a: &args::Args) -> Result<Vec<&'w Machine>> {
     let on = a.list("on");
     let needs = a.list("needs");
     for name in &on {
