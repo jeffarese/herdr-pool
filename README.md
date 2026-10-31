@@ -137,6 +137,33 @@ you answer it with `hc attach`.
 
 Every command takes `--help`, and the ones that report take `--json`.
 
+## Working with hc
+
+herdr-pool decides where a job runs and moves its code; hc is how you see and talk
+to it. Every job is an hc terminal, and the ADDRESS column of `ls` (`t3`, or
+`studio/t3` on another machine) is what `hc` takes. herdr-pool has no attach of
+its own.
+
+```sh
+herdr-pool run claude "Fix the flaky test"   # prints its address, e.g. t3
+hc attach t3                                 # watch or take over; ctrl+\ detaches
+hc send t3 "now add a test for it"           # a prompt, without attaching
+herdr-pool pull fix-the-flaky                # its work, as branch pool/fix-the-flaky
+herdr-pool rm fix-the-flaky                  # end it and give its tree back
+```
+
+| | herdr-pool (job names) | hc (addresses) |
+|---|---|---|
+| Start | `run`: picks the machine, snapshots your repo into a tree | `hc run [--on M]`: a terminal where you say, no tree |
+| Watch | `ls`, `diff`, `cat` | `hc attach`, `hc read`, bare `hc` to pick one |
+| Talk | | `hc send`, `hc keys t3 esc`, `hc interrupt` |
+| Wait | `wait <job>` | `hc wait <t>` (`--output X`, `--children`) |
+| End | `rm`: the terminal and its tree | `hc kill`: only the program; the tree stays taken |
+
+End pool jobs with `rm`, not `hc kill`, so the tree goes back. A job started outside
+a git repository has no tree (`-` in `ls`): it is a plain hc terminal, and `pull`
+has nothing to bring back.
+
 ## For agents
 
 `skills/herdr-pool/SKILL.md` is about 2.8 KB (roughly 700 tokens). It loads only
