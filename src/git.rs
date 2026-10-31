@@ -133,7 +133,7 @@ impl Repo {
     /// A bundle of the job's pinned snapshot minus everything reachable from
     /// `known` (commits the other side has): usually a few kilobytes.
     pub fn bundle(&self, job: &str, known: &[String]) -> Result<Vec<u8>> {
-        let file = std::env::temp_dir().join(format!("herdr-pool-{job}-{}.bundle", std::process::id()));
+        let file = temp_bundle(job);
         let mut revs = format!("refs/herdr-pool/{job}\n");
         for sha in self.have(known)? {
             revs += &format!("^{sha}\n");
@@ -153,7 +153,7 @@ impl Repo {
     }
 
     pub fn fetch_bundle(&self, bytes: &[u8], src: &str, dst: &str, force: bool) -> Result<()> {
-        let file = std::env::temp_dir().join(format!("herdr-pool-back-{}-{}.bundle", std::process::id(), crate::state::now_ms()));
+        let file = temp_bundle("back");
         std::fs::write(&file, bytes)?;
         let fetched = self.fetch(&file.to_string_lossy(), src, dst, force);
         let _ = std::fs::remove_file(&file);
@@ -187,6 +187,15 @@ impl Repo {
             Err(e) => Err(e.context("the changes conflict with your work tree; resolve the markers, or merge the branch instead")),
         }
     }
+}
+
+/// A temp file for one bundle. Its own even when threads bundle the same job
+/// at once, as a test run does shipping to every machine together: git
+/// refuses a bundle whose `.lock` another one holds.
+fn temp_bundle(what: &str) -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    std::env::temp_dir().join(format!("herdr-pool-{what}-{}-{n}.bundle", std::process::id()))
 }
 
 /// `git@github.com:Acme/web.git`, `https://github.com/Acme/web` ->
@@ -270,6 +279,13 @@ mod tests {
         repo.pin("job", &snap.sha).unwrap();
         sh(&dir, "git init -q --bare mirror.git");
         let bundle = repo.bundle("job", &[]).unwrap();
+        // A test run ships one job to every machine at once.
+        std::thread::scope(|s| {
+            let each: Vec<_> = (0..6).map(|_| s.spawn(|| repo.bundle("job", &[]))).collect();
+            for h in each {
+                assert!(h.join().unwrap().is_ok(), "bundles of one job at once");
+            }
+        });
         std::fs::write(dir.join("b.bundle"), &bundle).unwrap();
         sh(&dir, "git -C mirror.git fetch -q ../b.bundle refs/herdr-pool/job:refs/herdr-pool/job");
         sh(&dir, &format!("git -C mirror.git worktree add -q --detach ../tree {}", snap.sha));
