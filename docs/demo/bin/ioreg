@@ -1,0 +1,6 @@
+#!/bin/sh
+# A stand-in machine's hardware id: one per machine, none of them this Mac's.
+case "${DEMO_MACHINE:-}:$*" in
+?*:*IOPlatformExpertDevice*) printf '  "IOPlatformUUID" = "00000000-0000-0000-0000-demo-%s"\n' "$DEMO_MACHINE" ;;
+*) exec /usr/sbin/ioreg "$@" ;;
+esac

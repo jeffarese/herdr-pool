@@ -1,0 +1,16 @@
+#!/bin/sh
+# The demo's machines are stand-ins on one Mac. For the questions herdr-pool
+# asks about a machine (cores, memory, chip, load), this answers with that
+# machine's synthetic figures from machines/$DEMO_MACHINE; anything else goes
+# to the real sysctl.
+spec="${DEMO_KIT:-}/machines/${DEMO_MACHINE:-}"
+{ [ -n "${DEMO_MACHINE:-}" ] && [ -f "$spec" ] && [ "${1:-}" = -n ]; } || exec /usr/sbin/sysctl "$@"
+. "$spec"
+case $2 in
+hw.ncpu) echo "$cpus" ;;
+hw.memsize) echo "$((mem_gb * 1073741824))" ;;
+machdep.cpu.brand_string) echo "$chip" ;;
+kern.memorystatus_level) echo "$free_pct" ;;
+vm.loadavg) awk -v c="$cpus" -v p="$load_pct" 'BEGIN { l = c * p / 100; printf "{ %.2f %.2f %.2f }\n", l, l, l }' ;;
+*) exec /usr/sbin/sysctl "$@" ;;
+esac

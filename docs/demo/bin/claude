@@ -1,0 +1,184 @@
+#!/usr/bin/env python3
+"""A scripted stand-in for Claude Code, for the README's demo.
+
+herdr-pool starts it like Claude Code (`claude "<task>"`, the task with the
+pool's footer under it), and it behaves the way the pool needs an agent to: it
+says it is working and then done with OSC 7501, as Claude Code does, so hc and
+`herdr-pool wait` follow it; it makes a real change in its work tree (copied
+from changes/<story>) and runs the real tests on it, so `diff` and `pull` have
+real work to bring back; and if the footer names a parent to report to, it
+reports there with hc send. What it draws is modelled on Claude Code's screen.
+Nothing in it calls a model.
+"""
+import base64
+import difflib
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import textwrap
+import time
+import tty
+
+KIT = os.environ.get("DEMO_KIT", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# How long it takes, against the pauses below: a real agent takes minutes, and
+# the recording wants `wait` to have something to wait for.
+PACE = float(os.environ.get("DEMO_PACE", "1"))
+DIM, GREEN, RED, YELLOW, RESET = "\x1b[2m", "\x1b[32m", "\x1b[31m", "\x1b[33m", "\x1b[0m"
+GREY, RULE, ACCENT = "\x1b[38;2;153;153;153m", "\x1b[38;2;136;136;136m", "\x1b[38;2;215;119;87m"
+
+
+def b64(s):
+    return base64.b64encode(s.encode()).decode()
+
+
+def status(state, msg=None):
+    pairs = [f"state={state}", f"app=claude", f"title={b64(TITLE)}"]
+    if msg:
+        pairs.append(f"msg={b64(msg)}")
+    sys.stdout.write("\x1b]7501;" + ":".join(pairs) + "\x1b\\")
+    sys.stdout.flush()
+
+
+class Screen:
+    """What it has said, a spinner while it works, and the input box at the bottom, laid out again on
+    every resize (hc attach)."""
+
+    def __init__(self):
+        self.said = []
+        self.spinner = None
+        signal.signal(signal.SIGWINCH, lambda *_: self.draw())
+
+    def say(self, prefix, text, style="", pause=0.0):
+        self.said.append((prefix, text, style))
+        self.draw()
+        time.sleep(pause * PACE)
+
+    def draw(self):
+        try:
+            cols, rows = os.get_terminal_size(sys.stdout.fileno())
+        except OSError:
+            cols, rows = 100, 30
+        width = max(20, cols - 1)
+        lines = []
+        for prefix, text, style in self.said:
+            if prefix == "\n":
+                lines.append("")
+                continue
+            wrapped = textwrap.wrap(text, max(10, width - len(prefix)), break_on_hyphens=False) or [""]
+            for i, line in enumerate(wrapped):
+                lines.append((prefix if i == 0 else " " * len(prefix)) + style + line + (RESET if style else ""))
+        if self.spinner:
+            lines += ["", f"{ACCENT}✻{RESET} {self.spinner} {GREY}(esc to interrupt){RESET}"]
+        lines += ["", RULE + "─" * cols + RESET, "❯ ", RULE + "─" * cols + RESET,
+                  f"  {GREY}shop │ a scripted stand-in for the demo{RESET}"]
+        sys.stdout.write("\x1b[?25l\x1b[H\x1b[2J" + "\r\n".join(lines[-rows:]))
+        sys.stdout.flush()
+
+
+def tool(s, name, arg, result=None, pause=1.2):
+    s.spinner = {"Read": "Reading…", "Update": "Editing…", "Bash": "Running…", "Write": "Writing…"}.get(name, "Working…")
+    status("working", f"{name}({arg})")
+    s.say("⏺ ", f"{name}({arg})", pause=pause)
+    if result:
+        s.say("  ⎿  ", result, DIM, pause=0.3)
+
+
+def read(s, path, pause):
+    with open(path) as f:
+        n = len(f.readlines())
+    tool(s, "Read", path, f"Read {n} lines", pause)
+
+
+def update(s, story, path, pause):
+    """Puts the story's version of path in the work tree (the agent's edit) and says what changed."""
+    with open(path) as f:
+        before = f.readlines()
+    shutil.copyfile(os.path.join(KIT, "changes", story, path), path)
+    with open(path) as f:
+        after = f.readlines()
+    diff = list(difflib.unified_diff(before, after, n=0))
+    added = sum(1 for l in diff if l.startswith("+") and not l.startswith("+++"))
+    removed = sum(1 for l in diff if l.startswith("-") and not l.startswith("---"))
+    said = [f"{added} addition{'s' if added != 1 else ''}"] + ([f"{removed} removal{'s' if removed != 1 else ''}"] if removed else [])
+    tool(s, "Update", path, f"Updated {path} with {' and '.join(said)}", pause)
+
+
+def vitest(*files):
+    """Runs the real tests on the edited tree and says what vitest said."""
+    out = subprocess.run(["npx", "vitest", "run", *files], capture_output=True, text=True).stdout
+    out = re.sub(r"\x1b\[[0-9;]*m", "", out)
+    m = re.search(r"Tests\s+(.*?)\s*\n", out)
+    return (m.group(1) if m else "no result").strip(), "failed" not in out
+
+
+def story_retries(s):
+    read(s, "src/webhooks.ts", 1.4)
+    read(s, "test/webhooks.test.ts", 1.0)
+    s.say("⏺ ", "A delivery fails for good on the first 5xx or network error. I'll retry those with backoff "
+                "(250 ms, 500 ms, 1 s) and keep failing at once on a 4xx, since asking again won't change it.", pause=1.6)
+    update(s, "retries", "src/webhooks.ts", 1.6)
+    update(s, "retries", "test/webhooks.test.ts", 1.2)
+    s.spinner = "Running…"
+    status("working", "Bash(npx vitest run test/webhooks.test.ts)")
+    s.say("⏺ ", "Bash(npx vitest run test/webhooks.test.ts)")
+    result, ok = vitest("test/webhooks.test.ts")
+    s.say("  ⎿  ", result, GREEN if ok else RED, 0.6)
+    return ("Webhook deliveries now retry network errors and 5xx answers three times, backing off 250 ms, 500 ms "
+            "and 1 s; a 4xx still fails at once. Four new tests cover both, and the webhook tests pass.")
+
+
+def story_prices(s):
+    read(s, "src/money.ts", 1.2)
+    read(s, "src/cart.ts", 1.0)
+    s.say("⏺ ", "formatPrice always writes dollars. I'll give it the shop's currency and locale through Intl, "
+                "keeping USD as the default so nothing that calls it today changes.", pause=1.4)
+    update(s, "prices", "src/money.ts", 1.4)
+    update(s, "prices", "src/cart.ts", 1.0)
+    update(s, "prices", "test/money.test.ts", 1.0)
+    s.spinner = "Running…"
+    status("working", "Bash(npx vitest run test/money.test.ts test/cart.test.ts)")
+    s.say("⏺ ", "Bash(npx vitest run test/money.test.ts test/cart.test.ts)")
+    result, ok = vitest("test/money.test.ts", "test/cart.test.ts")
+    s.say("  ⎿  ", result, GREEN if ok else RED, 0.6)
+    return ("Prices now show in the shop's currency: formatPrice and the cart summary take a currency and "
+            "locale (USD by default) and format through Intl. Tests cover euros, pounds and grouping.")
+
+
+def story_notes(s):
+    read(s, "README.md", 1.2)
+    with open("NOTES.md", "w") as f:
+        f.write(f"# Notes\n\n{TITLE}\n")
+    tool(s, "Write", "NOTES.md", "Wrote 3 lines to NOTES.md", 1.0)
+    return "Wrote what I found to NOTES.md."
+
+
+TASK = next((a for a in reversed(sys.argv[1:]) if not a.startswith("-")), "")
+TITLE = (TASK.strip().splitlines() or ["Waiting for a task"])[0]
+
+
+def main():
+    if sys.stdin.isatty():
+        tty.setraw(sys.stdin.fileno())
+    s = Screen()
+    status("idle")
+    s.say("> ", TITLE, pause=0.8)
+    began = time.time()
+    t = TITLE.lower()
+    story = story_retries if "retr" in t else story_prices if ("price" in t or "currenc" in t) else story_notes
+    summary = story(s)
+    s.spinner = None
+    s.say("⏺ ", summary)
+    s.say("", f"✻ Worked for {int(time.time() - began)}s", DIM)
+    parent = re.search(r"hc send (\S+)", TASK)
+    if parent:
+        subprocess.run(["hc", "send", parent.group(1), summary], capture_output=True)
+    status("done", summary)
+    while True:  # waits at its prompt like Claude Code, until the job is removed
+        signal.pause()
+
+
+if __name__ == "__main__":
+    main()

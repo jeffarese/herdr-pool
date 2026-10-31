@@ -1,0 +1,2 @@
+# Synthetic: a small machine already running somebody's dev servers.
+chip="Apple M4" cpus=10 mem_gb=16 load_pct=81 free_pct=22

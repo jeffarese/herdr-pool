@@ -1,0 +1,2 @@
+# Synthetic: a desk machine with plenty of room. Tagged big in the config.
+chip="Apple M2 Ultra" cpus=24 mem_gb=192 load_pct=6 free_pct=86

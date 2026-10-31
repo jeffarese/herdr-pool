@@ -1,0 +1,3 @@
+#!/bin/sh
+# A stand-in machine's name, for herdr-pool's look at a machine it adds.
+if [ -n "${DEMO_MACHINE:-}" ]; then echo "$DEMO_MACHINE"; else exec /bin/hostname "$@"; fi

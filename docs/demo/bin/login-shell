@@ -1,0 +1,6 @@
+#!/bin/sh
+# The demo's $SHELL. herdr-pool asks a machine's login shell for its PATH;
+# this runs the question with no profile, so each stand-in machine keeps the
+# PATH stage.sh gave it (macOS's profile would put the real sysctl first).
+while [ $# -gt 1 ]; do shift; done
+exec /bin/sh -c "${1:-}"
