@@ -16,6 +16,126 @@ goes, getting **your code** there, and bringing the **work back**. herdr-pool do
 those three things and nothing else. It keeps no daemon and no state of its own
 beyond a cache.
 
+<p align="center">
+  <img src="docs/media/demo.gif" width="960" alt="A terminal session. herdr-pool status shows three machines with very different room: this laptop at 38% CPU, an idle studio and a busy mini. Two Claude Code agents start, one on studio and one on the laptop. hc attach shows one of them at work on studio. A test suite runs as six shards over studio and the laptop and passes in 5 seconds. herdr-pool wait sees both agents finish, diff shows what one changed, and pull --apply brings it into the work tree.">
+</p>
+<p align="center"><sub>
+  64 seconds, unedited (<a href="docs/media/demo.mp4">MP4</a>). The machines, their hardware and load, the
+  repository and the agents are synthetic: three hc cores on one Mac reporting made-up specs, and a script
+  standing in for Claude Code. herdr-pool, hc, the snapshots, work trees, test shards and the change brought
+  back are real. <a href="docs/demo">How it was recorded.</a>
+</sub></p>
+
+## Install
+
+```sh
+sh scripts/install.sh    # builds, installs ~/.local/bin/herdr-pool and the agent skill
+herdr-pool init          # sets the pool up (install.sh offers to run it)
+```
+
+`init` walks you through it, asking before it changes anything:
+
+1. **hc here.** If this machine lacks it, `init` offers its official installer.
+2. **Your other machines.** It lists the hosts in your ssh config and your
+   Tailscale peers. It looks only at the ones ssh already knows (their host key is in
+   `known_hosts`), without a prompt and read-only, to show each one's chip, cores,
+   memory and hc. You pick which ones join.
+3. **Getting in.** The pool reconnects without you, so ssh must log in on its own. For
+   a machine that wants a login, `init` offers to install your ssh key there
+   (`ssh-copy-id`) or to try another user name. For one ssh hasn't seen yet, it
+   lets you check its host key once.
+4. **hc there.** It asks before copying hc to machines that lack it (or have
+   one too old to work with this one).
+5. **Ready to work.** For each machine it reads the login PATH, copies your hc
+   templates, and checks git, the agents and disk. It offers to set your git
+   identity where it is missing and to update hc where it is behind.
+6. **The skill.** It installs or updates the agent skill for Claude Code.
+
+One machine at a time: `herdr-pool add` (pick from what was found),
+`herdr-pool add user@host`, or `herdr-pool add --via '<command>' --name N` for
+machines you reach some other way (`fly ssh console -a app --pty=false -C`).
+Without a terminal (scripts, agents), `add` behaves like
+`hc machine add --install` and asks nothing. `herdr-pool doctor` checks
+everything later; `doctor --fix` puts right what it can, asking first (without a
+terminal it changes only what `--yes` allows).
+
+**Claude Code's folder trust.** Claude Code asks before it works in a folder it
+hasn't seen, and an agent in a new pool tree would sit at that question. It keys
+that trust by the tree's repository, which for pool trees is the mirror the pool keeps
+on each machine. So when you `run` Claude Code, herdr-pool records the trust
+Claude Code's own message suggests (`projects[<mirror>].hasTrustDialogAccepted`
+in `~/.claude.json` there). It does this once per repository and machine, and again
+after a run where Claude Code didn't take its task, and only where Claude Code is set
+up already. The file is replaced whole, and only if nothing changed it meanwhile.
+`trust = false` in the config turns it off; agents then wait at the question until
+you answer it with `hc attach`.
+
+## A session
+
+What the video shows, a step at a time, from inside a repository.
+
+**See the pool.** `status` shows each machine's chip, cores and memory, how busy
+its CPU and memory are, and how many pool agents and jobs it runs against its caps.
+Here the laptop you type on is at 38%, the studio is nearly idle and tagged `big`,
+and a small mini is busy with somebody's dev servers:
+
+![herdr-pool status: local, this laptop, an M3 Pro with 12 cores and 36 GB at 38% CPU; studio, an M2 Ultra with 24 cores and 192 GB, tagged big, at 6%; mini, an M4 with 10 cores and 16 GB, at 81%](docs/media/status.png)
+
+**Hand out work.** `run` takes a snapshot of your work tree with your uncommitted
+changes, sends the machine only what it lacks of it (480 bytes here), gives the job
+a work tree of its own there with its dependencies installed, and starts the agent
+on its task. It ends with what to do next:
+
+![herdr-pool run --name retries claude "Add retries to the webhook client": the snapshot, sent to studio, a work tree there, dependencies already installed, Claude Code told to trust the trees, and a card with the commands to watch it, wait for it and bring its work back](docs/media/run.png)
+
+The first agent went to the idle studio. The second, started the same way, went to
+the laptop: studio already ran one, and the mini is busy.
+
+**Follow it.** `ls` lists jobs on every machine, and its ADDRESS column is what hc
+takes. `hc attach studio/retries` (a job's name works as well as its address) puts
+your terminal on the agent's, on the other machine; `ctrl+\` comes back and leaves
+it running:
+
+![herdr-pool ls: prices working on local at address t3, retries working on studio at studio/t6](docs/media/ls.png)
+
+![The agent's screen through hc attach: it has read the webhook client and its tests, said what it will change, and is editing src/webhooks.ts](docs/media/attach.png)
+
+**Test while they work.** `test` splits a suite into shards over the machines with
+room, on a snapshot of what you have now, so you can go on editing. A live board
+follows the shards; then you get a line per shard, and the end of the output of any
+that failed:
+
+![The live board: six shards, four on studio and two on local, two of them done](docs/media/test-live.png)
+
+![Six of six shards passed in 5 seconds, against about 12 for the suite in one go](docs/media/test.png)
+
+Studio took four shards, as many as its `max_jobs` allows, and the laptop two. The
+mini, at 81% CPU, would have been next.
+
+**Bring the work back.** `wait` returns when the agents are done, `diff` shows what
+one changed, and `pull --apply` brings its work back as branch `pool/retries` and
+applies it to your work tree, beside your own uncommitted change:
+
+![herdr-pool wait sees both agents done; diff --stat shows two files; pull --apply brings them back as pool/retries and applies them; git status shows them modified beside README.md](docs/media/pull.png)
+
+`herdr-pool rm retries` then ends the job and gives its tree back. With the skill
+installed, Claude Code does the same on its own: it starts jobs with `run`, waits
+for them and pulls their work ([For agents](#for-agents)).
+
+### Where work goes
+
+Machines differ, and so does how busy they are. Every time it places a job,
+herdr-pool asks each machine for its load and scores the ones with room. The
+lowest score wins:
+
+- **Agents** mostly wait on a model, so what counts most is how many the machine
+  already runs against its `max_agents`, then its CPU and memory.
+- **Commands and test shards** use the CPU, so its load counts most, then how
+  many it runs against `max_jobs`, then memory.
+- This machine starts a little ahead, since nothing has to be copied to it.
+  `weight` in the config favours a machine, `--needs big` keeps a job to machines
+  tagged `big`, and `--on` picks one yourself.
+
 ## What happens on `run`
 
 1. **Place.** Every machine reports CPU load, free memory, and how many pool
@@ -70,50 +190,6 @@ until you run it again. Claude Code keeps its own records of agents that worked
 there: their session logs (`~/.claude/projects/<tree>`) stay unless you add
 `--agent-logs`, and its entry for the repository in `~/.claude.json` stays.
 
-## Install
-
-```sh
-sh scripts/install.sh    # builds, installs ~/.local/bin/herdr-pool and the agent skill
-herdr-pool init          # sets the pool up (install.sh offers to run it)
-```
-
-`init` walks you through it, asking before it changes anything:
-
-1. **hc here.** If this machine lacks it, `init` offers its official installer.
-2. **Your other machines.** It lists the hosts in your ssh config and your
-   Tailscale peers. It looks only at the ones ssh already knows (their host key is in
-   `known_hosts`), without a prompt and read-only, to show each one's chip, cores,
-   memory and hc. You pick which ones join.
-3. **Getting in.** The pool reconnects without you, so ssh must log in on its own. For
-   a machine that wants a login, `init` offers to install your ssh key there
-   (`ssh-copy-id`) or to try another user name. For one ssh hasn't seen yet, it
-   lets you check its host key once.
-4. **hc there.** It asks before copying hc to machines that lack it (or have
-   one too old to work with this one).
-5. **Ready to work.** For each machine it reads the login PATH, copies your hc
-   templates, and checks git, the agents and disk. It offers to set your git
-   identity where it is missing and to update hc where it is behind.
-6. **The skill.** It installs or updates the agent skill for Claude Code.
-
-One machine at a time: `herdr-pool add` (pick from what was found),
-`herdr-pool add user@host`, or `herdr-pool add --via '<command>' --name N` for
-machines you reach some other way (`fly ssh console -a app --pty=false -C`).
-Without a terminal (scripts, agents), `add` behaves like
-`hc machine add --install` and asks nothing. `herdr-pool doctor` checks
-everything later; `doctor --fix` puts right what it can, asking first (without a
-terminal it changes only what `--yes` allows).
-
-**Claude Code's folder trust.** Claude Code asks before it works in a folder it
-hasn't seen, and an agent in a new pool tree would sit at that question. It keys
-that trust by the tree's repository, which for pool trees is the mirror the pool keeps
-on each machine. So when you `run` Claude Code, herdr-pool records the trust
-Claude Code's own message suggests (`projects[<mirror>].hasTrustDialogAccepted`
-in `~/.claude.json` there). It does this once per repository and machine, and again
-after a run where Claude Code didn't take its task, and only where Claude Code is set
-up already. The file is replaced whole, and only if nothing changed it meanwhile.
-`trust = false` in the config turns it off; agents then wait at the question until
-you answer it with `hc attach`.
-
 ## Commands
 
 | | |
@@ -163,6 +239,44 @@ herdr-pool rm fix-the-flaky                  # end it and give its tree back
 End pool jobs with `rm`, not `hc kill`, so the tree goes back. A job started outside
 a git repository has no tree (`-` in `ls`): it is a plain hc terminal, and `pull`
 has nothing to bring back.
+
+## Without herdr: Rex, tmux, any terminal
+
+herdr-pool doesn't need herdr, the app. Everything it does goes through hc
+(herdr-core), a program of its own with no window: it keeps terminals alive on
+each machine and reaches the other machines over ssh. `init` installs it where it's
+missing, or:
+
+```sh
+curl -fsSL https://releases.herdr.dev/core/install.sh | sh
+```
+
+So any terminal works: Rex, Ghostty, iTerm2, the one in your editor, tmux, or an
+ssh session. Jobs don't belong to the terminal that started them; they keep running
+when it closes, and any terminal can look in with hc.
+
+**In Rex.** Run herdr-pool in a block like any command, and give a job a block of
+its own when you want to watch it:
+
+```sh
+rex split -- hc attach studio/retries                   # the agent on studio, beside you
+rex run --split=below --ratio 35 -- herdr-pool test     # a test run in a block underneath
+herdr-pool run --keep --on studio --name dev -- npm run dev
+rex run -- hc attach studio/dev                         # that server, in a window of its own
+```
+
+`ctrl+\` detaches and leaves the job running; bare `hc` lists every terminal to pick
+one.
+
+**tmux and the rest.** Whatever opens a terminal will do:
+`tmux split-window 'hc attach studio/retries'`, a new tab, or `hc attach` right
+where you are.
+
+**Agents outside hc.** Claude Code in a Rex block, or anywhere outside an hc
+terminal, uses the pool through the skill all the same. hc can only type an
+agent's report into an hc terminal, so it waits with `herdr-pool wait <job>
+--tail 20` instead of `hc wait --children`, and the footer on the job's task asks
+that agent to end with a short summary.
 
 ## For agents
 
@@ -244,7 +358,11 @@ and `test`. Without one, setup comes from the lockfile (npm, pnpm, yarn or bun).
 cargo test                                       # unit tests, real git included
 cargo build --release && sh tests/integration.sh  # end to end with real hc
 HPIT_REMOTE=you@other-mac sh tests/integration.sh # ... with a real second machine
+cargo build --release && sh docs/demo/record.sh   # the video and stills above, again
 ```
+
+[`docs/demo`](docs/demo) holds the synthetic pool behind the video and says how to
+record it again or look around in it.
 
 The integration test runs a scratch hc session plus two more on the same host,
 standing in for other machines. With `HPIT_REMOTE`, machine `b` is that host
