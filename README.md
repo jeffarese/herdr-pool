@@ -29,9 +29,19 @@ beyond a cache.
 ## Install
 
 ```sh
-sh scripts/install.sh    # builds, installs ~/.local/bin/herdr-pool and the agent skill
-herdr-pool init          # sets the pool up (install.sh offers to run it)
+brew install jeffarese/tap/herdr-pool
+herdr-pool init          # sets the pool up and installs the agent skill
 ```
+
+`brew upgrade herdr-pool` updates it; then `herdr-pool skill install` refreshes the
+agent skill (`herdr-pool doctor` says when it is out of date). Apple silicon
+Macs and Linux get a prebuilt binary; Intel Macs build from source (Homebrew
+fetches Rust for that).
+
+From source instead: `sh scripts/install.sh` builds with Cargo, installs
+`~/.local/bin/herdr-pool` and the skill, and offers to run `init`; run it again
+to update. If you used it before and now switch to Homebrew, delete
+`~/.local/bin/herdr-pool` so the old copy doesn't shadow the new one.
 
 `init` walks you through it, asking before it changes anything:
 
@@ -363,6 +373,12 @@ cargo build --release && sh docs/demo/record.sh   # the video and stills above, 
 
 [`docs/demo`](docs/demo) holds the synthetic pool behind the video and says how to
 record it again or look around in it.
+
+To release, run `sh scripts/release.sh X.Y.Z` from a clean `main`. It bumps the
+version, tags it and publishes the GitHub release. Then it updates the formula in
+[jeffarese/homebrew-tap](https://github.com/jeffarese/homebrew-tap), waits for the
+tap's CI to build the bottles and publishes them, so `brew upgrade` picks the
+release up.
 
 The integration test runs a scratch hc session plus two more on the same host,
 standing in for other machines. With `HPIT_REMOTE`, machine `b` is that host
