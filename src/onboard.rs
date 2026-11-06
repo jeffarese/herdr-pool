@@ -132,7 +132,7 @@ pub fn add(argv: &[String]) -> Result<i32> {
             match &found.reach {
                 Reach::Ready => s.clear(),
                 Reach::Unsupported(why) => {
-                    s.fail(format!("{name} runs {why}: the pool needs macOS or Linux"));
+                    s.fail(format!("{name} runs {}", unsupported(why)));
                     return Ok(1);
                 }
                 Reach::Offline(why) | Reach::Login(why) => s.warn(format!("Couldn't look at {name} first ({why}): adding it anyway")),
@@ -413,7 +413,7 @@ fn item(c: &Candidate) -> Item {
         Reach::Login(_) => ("ssh wants a login: pick it to sort that out".to_string(), None),
         Reach::Unchecked => ("new to ssh: pick it to check its host key".to_string(), None),
         Reach::Offline(why) => (String::new(), Some(why.clone())),
-        Reach::Unsupported(what) => (String::new(), Some(format!("{what}: the pool runs on macOS and Linux"))),
+        Reach::Unsupported(what) => (String::new(), Some(unsupported(what))),
     };
     let via = match (c.from_ssh_config, c.on_tailnet) {
         (true, true) => " ssh config, Tailscale",
@@ -774,7 +774,7 @@ pub fn tune(hc: &mut Hc, world: &World, cfg: &Config, yes: bool, only: Option<&[
             }
             Ok(h) if !h.has_git() => {
                 fine = false;
-                ui::step(Tone::Bad, &format!("{} has no git on its login PATH", m.name), &[ui::dim("install git there (macOS: xcode-select --install)")]);
+                ui::step(Tone::Bad, &format!("{} has no git on its login PATH", m.name), &[ui::dim(git_hint(&h.os))]);
             }
             Ok(h) if h.agents().is_empty() => {
                 fine = false;
@@ -900,8 +900,33 @@ fn finish(hc: &mut Hc, cfg: &Config) -> Result<i32> {
     Ok(0)
 }
 
+/// Why a machine can't join, and what would: a Windows PC joins through WSL.
+fn unsupported(os: &str) -> String {
+    if os.eq_ignore_ascii_case("windows") {
+        format!("{os}: the pool runs on macOS, Linux and WSL; add the WSL there (with its own sshd or Tailscale)")
+    } else {
+        format!("{os}: the pool runs on macOS, Linux and WSL")
+    }
+}
+
+/// How to install git on a machine whose `uname -s` is `os`.
+fn git_hint(os: &str) -> &'static str {
+    match os {
+        "Darwin" => "install git there: xcode-select --install (or brew install git)",
+        _ => "install git there: apt install git, dnf install git, or your distribution's package",
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn windows_is_told_about_wsl() {
+        assert!(super::unsupported("windows").contains("add the WSL there"));
+        assert!(!super::unsupported("android").contains("add the WSL"));
+        assert!(super::git_hint("Darwin").contains("xcode-select"));
+        assert!(super::git_hint("Linux").contains("apt install git"));
+    }
+
     use super::*;
 
     #[test]

@@ -38,6 +38,8 @@ pub struct Probe {
     /// The machine's own id (IOPlatformUUID, /etc/machine-id): the same
     /// machine found twice is one.
     pub id: String,
+    /// Linux under WSL on a Windows PC.
+    pub wsl: bool,
     pub hc: Option<String>,
     pub git: bool,
     pub email: String,
@@ -48,6 +50,7 @@ impl Probe {
     pub fn summary(&self) -> String {
         let mut parts = vec![match self.os.as_str() {
             "Darwin" => "macOS".to_string(),
+            "Linux" if self.wsl => "WSL".into(),
             "" => "?".into(),
             os => os.into(),
         }];
@@ -262,9 +265,15 @@ pub struct Peer {
     pub online: bool,
 }
 
+/// The Tailscale CLI: on the PATH, in the macOS app, or under WSL the
+/// Windows one (WSL shares the Windows host's tailnet unless Tailscale runs
+/// in WSL itself).
 fn tailscale() -> Option<PathBuf> {
-    let app = PathBuf::from("/Applications/Tailscale.app/Contents/MacOS/Tailscale");
-    crate::hc::on_path("tailscale").or_else(|| app.is_file().then_some(app))
+    let file = |p: &str| Some(PathBuf::from(p)).filter(|p| p.is_file());
+    crate::hc::on_path("tailscale")
+        .or_else(|| file("/Applications/Tailscale.app/Contents/MacOS/Tailscale"))
+        .or_else(|| crate::hc::on_path("tailscale.exe"))
+        .or_else(|| file("/mnt/c/Program Files/Tailscale/tailscale.exe"))
 }
 
 /// Your other devices on Tailscale, from `tailscale status --json`.
@@ -415,10 +424,14 @@ Darwin)
   echo "model=$(sysctl -n machdep.cpu.brand_string 2>/dev/null)"
   echo "id=$(ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null | awk -F'"' '/IOPlatformUUID/{print $4}')" ;;
 Linux)
-  echo "cpus=$(nproc 2>/dev/null)"
+  echo "cpus=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null)"
   echo "mem=$(awk '/^MemTotal/{printf "%d", $2*1024}' /proc/meminfo 2>/dev/null)"
-  echo "model=$(awk -F': *' '/^model name/{print $2; exit}' /proc/cpuinfo 2>/dev/null)"
-  echo "id=$(cat /etc/machine-id 2>/dev/null)" ;;
+  m=$(awk -F': *' '/^model name/{print $2; exit}' /proc/cpuinfo 2>/dev/null)
+  [ -n "$m" ] || m=$(LC_ALL=C lscpu 2>/dev/null | awk -F': *' '/^Model name/{print $2; exit}')
+  [ -n "$m" ] || m=$(tr -d '\0' < /sys/firmware/devicetree/base/model 2>/dev/null)
+  echo "model=$m"
+  echo "id=$(cat /etc/machine-id 2>/dev/null || cat /var/lib/dbus/machine-id 2>/dev/null)"
+  grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null && echo "wsl=1" ;;
 esac
 p=$(command -v herdr-core 2>/dev/null) || p=$HOME/.local/bin/herdr-core
 [ -x "$p" ] && echo "hc=$("$p" --version 2>/dev/null | head -n 1)"
@@ -541,6 +554,7 @@ fn parse_probe(text: &str) -> Probe {
             "id" => p.id = v.into(),
             "hc" => p.hc = v.split_whitespace().last().map(String::from),
             "git" => p.git = true,
+            "wsl" => p.wsl = v == "1",
             "email" => p.email = v.into(),
             _ => {}
         }
@@ -643,6 +657,25 @@ mod tests {
         assert!(p.git && p.email.is_empty());
         let linux = parse_probe("os=Linux\narch=x86_64\ncpus=8\nmodel=Intel(R) Core(TM) i7-8700K CPU @ 3.70GHz\n");
         assert_eq!(linux.summary(), "Linux · Core i7-8700K · 8 cores");
+        assert!(!linux.wsl);
+        let wsl = parse_probe("os=Linux\narch=x86_64\ncpus=16\nmem=33554432000\nwsl=1\n");
+        assert!(wsl.wsl);
+        assert_eq!(wsl.summary(), "WSL · x86_64 · 16 cores · 31 GB");
+    }
+
+    /// The probe script runs as it is on this machine, macOS or Linux.
+    #[test]
+    fn this_machine_answers_the_probe() {
+        let p = here();
+        assert_eq!(p.os, if cfg!(target_os = "macos") { "Darwin" } else { "Linux" });
+        assert!(p.cpus > 0 && p.mem_gb > 0.0, "{p:?}");
+        assert!(!p.name.is_empty() && !p.arch.is_empty(), "{p:?}");
+        // CI says whether a job runs under WSL.
+        if let Ok(want) = std::env::var("HERDR_POOL_TEST_EXPECT_WSL") {
+            assert_eq!(p.wsl, want == "1", "{p:?}");
+            let os = if cfg!(target_os = "macos") { "macOS" } else if p.wsl { "WSL" } else { "Linux" };
+            assert!(p.summary().starts_with(os), "{}", p.summary());
+        }
     }
 
     #[test]

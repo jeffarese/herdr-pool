@@ -352,6 +352,7 @@ done
 printf '@email\t%s\n' "$(git config --global user.email 2>/dev/null)"
 printf '@name\t%s\n' "$(git config --global user.name 2>/dev/null)"
 printf '@disk\t%s\n' "$(df -Pk "$HOME" 2>/dev/null | awk 'NR==2{printf "%d", $4/1048576}')"
+printf '@os\t%s\n' "$(uname -s 2>/dev/null)"
 "#;
 
 pub struct Health {
@@ -360,6 +361,8 @@ pub struct Health {
     pub email: String,
     pub user: String,
     pub disk_gb: Option<u64>,
+    /// `uname -s` there: `Darwin`, `Linux`.
+    pub os: String,
 }
 
 impl Health {
@@ -373,11 +376,12 @@ impl Health {
 }
 
 fn parse_health(text: &str) -> Health {
-    let mut h = Health { tools: Vec::new(), email: String::new(), user: String::new(), disk_gb: None };
+    let mut h = Health { tools: Vec::new(), email: String::new(), user: String::new(), disk_gb: None, os: String::new() };
     for line in text.lines() {
         let Some((k, v)) = line.split_once('\t') else { continue };
         match k {
             "@email" => h.email = v.trim().into(),
+            "@os" => h.os = v.trim().into(),
             "@name" => h.user = v.trim().into(),
             "@disk" => h.disk_gb = v.trim().parse().ok(),
             _ => h.tools.push((k.into(), version_of(v))),
@@ -787,6 +791,16 @@ mod tests {
         assert_eq!((h.email.as_str(), h.user.as_str(), h.disk_gb), ("me@x.io", "Me", Some(120)));
         let bare = parse_health("@email\t\n@disk\t\n");
         assert!(!bare.has_git() && bare.email.is_empty() && bare.disk_gb.is_none());
+        assert_eq!(parse_health("@os\tLinux\n").os, "Linux");
+    }
+
+    /// The health script runs as it is on this machine, macOS or Linux.
+    #[test]
+    fn health_script_runs_here() {
+        let out = std::process::Command::new("sh").args(["-c", CHECK, "sh", "git"]).output().unwrap();
+        let h = parse_health(&String::from_utf8_lossy(&out.stdout));
+        assert_eq!(h.os, if cfg!(target_os = "macos") { "Darwin" } else { "Linux" });
+        assert!(h.has_git() && h.disk_gb.is_some(), "{}", String::from_utf8_lossy(&out.stdout));
     }
 
     #[test]
