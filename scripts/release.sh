@@ -8,6 +8,8 @@
 # release. It then opens the formula update on the tap, waits for the tap's CI
 # to build the bottles, and runs the tap's publish workflow, which uploads them
 # and merges the update. From then on `brew upgrade herdr-pool` installs it.
+# Meanwhile the tag's Release workflow adds static binaries for macOS and
+# Linux (WSL included) to the GitHub release, for scripts/install.sh.
 set -eu
 die() { echo "release: $*" >&2; exit 1; }
 
@@ -45,7 +47,9 @@ fi
 
 git tag -a "$tag" -m "herdr-pool $version"
 git push -q origin "$tag"
-gh release create "$tag" -R "$repo" --verify-tag --title "herdr-pool $version" --generate-notes
+# The Release workflow creates it if it gets there first.
+gh release view "$tag" -R "$repo" >/dev/null 2>&1 ||
+  gh release create "$tag" -R "$repo" --verify-tag --title "herdr-pool $version" --generate-notes
 
 # The formula update. bump-formula-pr works in the local clone of the tap and
 # pushes its branch there (--no-fork), so the PR runs the tap's CI.

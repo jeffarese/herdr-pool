@@ -1,5 +1,7 @@
 # herdr-pool
 
+[![CI](https://github.com/jeffarese/herdr-pool/actions/workflows/ci.yml/badge.svg)](https://github.com/jeffarese/herdr-pool/actions/workflows/ci.yml)
+
 Your machines as one pool for coding agents and test runs, built on
 [herdr-core](https://github.com/herdrdev/herdr-core) (`hc`).
 
@@ -11,7 +13,7 @@ herdr-pool pull fix-the-flaky --apply                       # the agent's work, 
 
 hc already runs terminals that outlive you, on any machine you add, and routes an
 agent's reports to the terminal that started it, across machines too. What it leaves
-to you is the part that makes several Macs feel like one: deciding **where** work
+to you is the part that makes several machines feel like one: deciding **where** work
 goes, getting **your code** there, and bringing the **work back**. herdr-pool does
 those three things and nothing else. It keeps no daemon and no state of its own
 beyond a cache.
@@ -38,10 +40,21 @@ agent skill (`herdr-pool doctor` says when it is out of date). Apple silicon
 Macs and Linux get a prebuilt binary; Intel Macs build from source (Homebrew
 fetches Rust for that).
 
-From source instead: `sh scripts/install.sh` builds with Cargo, installs
-`~/.local/bin/herdr-pool` and the skill, and offers to run `init`; run it again
-to update. If you used it before and now switch to Homebrew, delete
-`~/.local/bin/herdr-pool` so the old copy doesn't shadow the new one.
+Without Homebrew (Linux, WSL, any Mac), the release binary, x86_64 or arm64.
+The script checks its SHA-256, installs `~/.local/bin/herdr-pool` and the
+skill, and offers to run `init`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/jeffarese/herdr-pool/main/scripts/install.sh | sh
+```
+
+The Linux builds are static, so they run on any distribution.
+
+From source instead (Rust 1.85 or later): `sh scripts/install.sh` from a
+checkout builds with Cargo and does the same. Run either again to update;
+`HERDR_POOL_INSTALL_DIR` installs somewhere else. If you used one of them and
+now switch to Homebrew, delete `~/.local/bin/herdr-pool` so the old copy
+doesn't shadow the new one.
 
 `init` walks you through it, asking before it changes anything:
 
@@ -316,7 +329,7 @@ The CLI is written for agents as much as for people:
   changing files. Split across machines, a 10-minute suite takes a fraction of
   that.
 - **OS or arch matrix.** `test --each -- cargo test` runs the whole suite on every
-  machine, for example your Macs and a Linux box.
+  machine, for example your Macs, a Linux box and a WSL on a Windows PC.
 - **Offload a heavy build.** `run --needs big -- cargo build --release`, then
   `cat <job> target/release/x > x` for an artifact.
 - **Long-running servers.** `run --keep --on studio -- npm run dev` keeps it up on
@@ -362,6 +375,31 @@ and `test`. Without one, setup comes from the lockfile (npm, pnpm, yarn or bun).
 - Trust is hc's: anyone who can reach your hc socket can run commands on every
   machine you added. Sessions are not a security boundary.
 
+## Linux and WSL
+
+Every machine in the pool, this one included, can be a Mac or a Linux box;
+hc runs on both, x86_64 and arm64. `status` shows each one's system, chip,
+cores and memory either way; on Linux the pool reads load and memory from
+`/proc`. When git is missing, `doctor` gives the install command for the
+machine's system.
+
+**WSL 2 on a Windows PC** is Linux to the pool; `status` and `init` call it
+`WSL`. Run herdr-pool, hc, git and the agents inside WSL:
+
+- **ssh is WSL's own.** The pool reads `~/.ssh/config` and `known_hosts` in
+  WSL, not the ones in your Windows user folder: copy your config and keys
+  over (or create new keys and let `init` install them).
+- **Tailscale.** If Tailscale runs on Windows, `init` asks the Windows
+  client (`tailscale.exe`) for your devices, and WSL reaches them through
+  Windows. Tailscale inside WSL works too.
+- **Code stays in the Linux file system.** Work in `~/src/...`, not
+  `/mnt/c/...`: snapshots, work trees and installs are much faster there.
+- **A WSL as another machine.** To give a Windows PC's WSL jobs, other
+  machines need ssh into WSL itself, not into Windows: run `sshd` in WSL
+  and reach it through Tailscale in WSL or WSL's mirrored networking, then
+  `herdr-pool add` it like any Linux box. A Windows device that Tailscale
+  lists (OS `windows`) can't join as it is; `init` says so.
+
 ## Development
 
 ```sh
@@ -369,7 +407,13 @@ cargo test                                       # unit tests, real git included
 cargo build --release && sh tests/integration.sh  # end to end with real hc
 HPIT_REMOTE=you@other-mac sh tests/integration.sh # ... with a real second machine
 cargo build --release && sh docs/demo/record.sh   # the video and stills above, again
+cargo clippy --all-targets -- -D warnings         # lints, as CI runs them
 ```
+
+CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs clippy on
+macOS and Linux, the unit tests on Linux x86_64 and arm64, macOS and WSL 2,
+the integration suite with a real hc on Linux and in WSL, a build with the
+oldest supported Rust (1.85), and both ways of `scripts/install.sh`.
 
 [`docs/demo`](docs/demo) holds the synthetic pool behind the video and says how to
 record it again or look around in it.
@@ -378,7 +422,10 @@ To release, run `sh scripts/release.sh X.Y.Z` from a clean `main`. It bumps the
 version, tags it and publishes the GitHub release. Then it updates the formula in
 [jeffarese/homebrew-tap](https://github.com/jeffarese/homebrew-tap), waits for the
 tap's CI to build the bottles and publishes them, so `brew upgrade` picks the
-release up.
+release up. The tag also starts the
+[Release workflow](.github/workflows/release.yml), which adds static binaries
+for macOS (arm64, x86_64) and Linux (x86_64, arm64), their `SHA256SUMS` and
+build provenance to the GitHub release, for the `curl … | sh` install.
 
 The integration test runs a scratch hc session plus two more on the same host,
 standing in for other machines. With `HPIT_REMOTE`, machine `b` is that host

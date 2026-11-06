@@ -1,0 +1,167 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  lint:
+    name: clippy (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo clippy --all-targets --locked -- -D warnings
+
+  test:
+    name: test (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: Linux x86_64, os: ubuntu-latest, integration: true }
+          - { name: Linux arm64, os: ubuntu-24.04-arm, integration: true }
+          # hc on macOS installs as a signed app bundle; the end-to-end
+          # suite runs on Macs by hand (see the README).
+          - { name: macOS arm64, os: macos-latest, integration: false }
+    runs-on: ${{ matrix.os }}
+    env:
+      HERDR_POOL_TEST_EXPECT_WSL: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo test --locked
+      - name: Install hc
+        if: matrix.integration
+        run: |
+          curl -fsSL https://releases.herdr.dev/core/install.sh | sh
+          "$HOME/.local/bin/herdr-core" --version
+      - name: End to end with a real hc
+        if: matrix.integration
+        run: cargo build --release --locked && sh tests/integration.sh
+
+  wsl:
+    name: test (WSL 2, Ubuntu 24.04)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: wsl-bash {0}
+    steps:
+      # Scripts in the repo must keep LF endings inside WSL.
+      - name: Check out with LF line endings
+        shell: pwsh
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Vampire/setup-wsl@4c48163d9f981914dd8caa0fc335fe19cca5bff4 # v7.2.0
+        with:
+          distribution: Ubuntu-24.04
+          additional-packages: build-essential ca-certificates curl git
+      - name: Install Rust and hc
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          curl -fsSL https://releases.herdr.dev/core/install.sh | sh
+      # Builds in the Linux file system: /mnt/<drive> is slow and loses
+      # file modes.
+      - name: Copy the checkout into WSL
+        run: rm -rf ~/src && mkdir ~/src && cp -a . ~/src/
+      - name: cargo test
+        run: |
+          . "$HOME/.cargo/env"
+          cd ~/src
+          uname -a
+          HERDR_POOL_TEST_EXPECT_WSL=1 cargo test --locked
+      - name: End to end with a real hc
+        run: |
+          . "$HOME/.cargo/env"
+          cd ~/src
+          cargo build --release --locked && sh tests/integration.sh
+
+  msrv:
+    name: MSRV (1.85)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.85"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo check --all-targets --locked
+
+  install:
+    name: install script (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # HOME is a scratch folder: the script also installs the agent skill.
+      - name: From a checkout (builds with cargo)
+        run: |
+          # Rust stays where it is when HOME moves.
+          export CARGO_HOME="$HOME/.cargo" RUSTUP_HOME="$HOME/.rustup"
+          home="$RUNNER_TEMP/home"
+          mkdir -p "$home/.claude"
+          HOME="$home" HERDR_POOL_INSTALL_DIR="$RUNNER_TEMP/src" sh scripts/install.sh
+          "$RUNNER_TEMP/src/herdr-pool" --version
+          test -f "$home/.claude/skills/herdr-pool/SKILL.md"
+      # The download path of `curl … | sh`, against a release packaged here.
+      - name: A release download, piped to sh
+        run: |
+          case "$(uname -s)" in
+            Darwin) os=apple-darwin ;;
+            Linux) os=unknown-linux-musl; sudo apt-get update -q && sudo apt-get install -y -q musl-tools ;;
+          esac
+          target=$(uname -m | sed 's/^arm64$/aarch64/')-$os
+          rustup target add "$target"
+          cargo build --release --locked --target "$target"
+          sh scripts/package.sh "$target"
+          export HERDR_POOL_DOWNLOAD_URL="file://$PWD/dist" HERDR_POOL_INSTALL_DIR="$RUNNER_TEMP/rel"
+          home="$RUNNER_TEMP/home"
+          HOME="$home" sh < scripts/install.sh
+          "$RUNNER_TEMP/rel/herdr-pool" --version
+          # A damaged download installs nothing.
+          rm "$RUNNER_TEMP/rel/herdr-pool"
+          echo damaged >> "dist/herdr-pool-$target.tar.gz"
+          if HOME="$home" sh < scripts/install.sh; then echo "::error::installed a damaged download"; exit 1; fi
+          [ ! -e "$RUNNER_TEMP/rel/herdr-pool" ]

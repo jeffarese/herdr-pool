@@ -2,7 +2,7 @@
 name = "herdr-pool"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.82"
+rust-version = "1.85"
 description = "Your machines as one pool for coding agents and test runs, on top of herdr-core (hc)"
 license = "MIT"
 publish = false
